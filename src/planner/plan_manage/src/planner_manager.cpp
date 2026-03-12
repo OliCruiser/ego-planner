@@ -39,18 +39,20 @@ namespace ego_planner
 
   // SECTION rebond replanning
 
-  bool EGOPlannerManager::reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel,
-                                        Eigen::Vector3d start_acc, Eigen::Vector3d local_target_pt,
-                                        Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj)
+  bool EGOPlannerManager::reboundReplan(Eigen::Vector3d start_pt, Eigen::Vector3d start_vel,Eigen::Vector3d start_acc, 
+                                        Eigen::Vector3d local_target_pt,Eigen::Vector3d local_target_vel, 
+                                        bool flag_polyInit, bool flag_randomPolyTraj)
   {
 
     static int count = 0;
+    // 打印本次重规划的编号，方便在终端里区分第几次调用。
     std::cout << endl
               << "[rebo replan]: -------------------------------------" << count++ << std::endl;
     cout.precision(3);
     cout << "start: " << start_pt.transpose() << ", " << start_vel.transpose() << "\ngoal:" << local_target_pt.transpose() << ", " << local_target_vel.transpose()
          << endl;
 
+    // 如果起点已经非常接近局部目标点，就不再继续规划。
     if ((start_pt - local_target_pt).norm() < 0.2)
     {
       cout << "Close to goal" << endl;
@@ -62,8 +64,11 @@ namespace ego_planner
     ros::Duration t_init, t_opt, t_refine;
 
     /*** STEP 1: INIT ***/
+    // 先估计一个初始采样时间间隔。
+    // 这里适当放宽一点，避免初始轨迹一开始就太“紧”，从而违反速度或加速度约束。
     double ts = (start_pt - local_target_pt).norm() > 0.1 ? pp_.ctrl_pt_dist / pp_.max_vel_ * 1.2 : pp_.ctrl_pt_dist / pp_.max_vel_ * 5; // pp_.ctrl_pt_dist / pp_.max_vel_ is too tense, and will surely exceed the acc/vel limits
     vector<Eigen::Vector3d> point_set, start_end_derivatives;
+    // 首次调用，或者之前初始化效果不好时，强制重新用多项式轨迹生成初值。
     static bool flag_first_call = true, flag_force_polynomial = false;
     bool flag_regenerate = false;
     do
@@ -74,20 +79,27 @@ namespace ego_planner
 
       if (flag_first_call || flag_polyInit || flag_force_polynomial /*|| ( start_pt - local_target_pt ).norm() < 1.0*/) // Initial path generated from a min-snap traj by order.
       {
+        // 从当前状态到局部目标重新生成一条全新的多项式初始轨迹。
+        // 首次重规划，或者旧轨迹不适合继续复用时，会走这个分支。
         flag_first_call = false;
         flag_force_polynomial = false;
 
         PolynomialTraj gl_traj;
 
+        // 根据距离和最大速度/加速度 估计一段飞行时间，
+        // 让初始轨迹不要过激，否则后面很容易超动力学约束。
         double dist = (start_pt - local_target_pt).norm();
         double time = pow(pp_.max_vel_, 2) / pp_.max_acc_ > dist ? sqrt(dist / pp_.max_acc_) : (dist - pow(pp_.max_vel_, 2) / pp_.max_acc_) / pp_.max_vel_ + 2 * pp_.max_vel_ / pp_.max_acc_;
 
         if (!flag_randomPolyTraj)
         {
+          // 不加随机中间点，直接生成起点到终点的一段满足速度/加速度边界条件的多项式轨迹。
           gl_traj = PolynomialTraj::one_segment_traj_gen(start_pt, start_vel, start_acc, local_target_pt, local_target_vel, Eigen::Vector3d::Zero(), time);
         }
         else
         {
+          // 插入一个随机中间点，生成一条“绕一下”的初始轨迹。
+          // 连续失败时，这样可以尝试不同拓扑的路径，避免总卡在同一类解里。
           Eigen::Vector3d horizen_dir = ((start_pt - local_target_pt).cross(Eigen::Vector3d(0, 0, 1))).normalized();
           Eigen::Vector3d vertical_dir = ((start_pt - local_target_pt).cross(horizen_dir)).normalized();
           Eigen::Vector3d random_inserted_pt = (start_pt + local_target_pt) / 2 +
@@ -104,6 +116,8 @@ namespace ego_planner
 
         double t;
         bool flag_too_far;
+        // 把多项式轨迹离散采样成一串路径点。
+        // 如果相邻采样点太稀，就缩小 ts，直到点间距适合后续 B-spline 参数化。
         ts *= 1.5; // ts will be divided by 1.5 in the next
         do
         {
@@ -124,6 +138,7 @@ namespace ego_planner
           }
         } while (flag_too_far || point_set.size() < 7); // To make sure the initial path has enough points.
         t -= ts;
+        // 记录起终点处的速度、加速度约束，后面参数化 B-spline 时要用。
         start_end_derivatives.push_back(gl_traj.evaluateVel(0));
         start_end_derivatives.push_back(local_target_vel);
         start_end_derivatives.push_back(gl_traj.evaluateAcc(0));
@@ -131,6 +146,8 @@ namespace ego_planner
       }
       else // Initial path generated from previous trajectory.
       {
+        // 尽量复用上一条局部轨迹里“还没执行完”的那一段，
+        // 再把它的末端连接到新的局部目标，这样轨迹会更连续、更平滑。
 
         double t;
         double t_cur = (ros::Time::now() - local_data_.start_time_).toSec();
@@ -138,6 +155,8 @@ namespace ego_planner
         vector<double> pseudo_arc_length;
         vector<Eigen::Vector3d> segment_point;
         pseudo_arc_length.push_back(0.0);
+        // 对当前还没执行完的 B-spline 进行采样，并累计一个“伪弧长”，
+        // 这样后面就能按近似等间距重新采样控制点。
         for (t = t_cur; t < local_data_.duration_ + 1e-3; t += ts)
         {
           segment_point.push_back(local_data_.position_traj_.evaluateDeBoorT(t));
@@ -148,6 +167,7 @@ namespace ego_planner
         }
         t -= ts;
 
+        // 如果旧轨迹的末端还到不了新的局部目标，就额外补一小段多项式轨迹去连接目标。
         double poly_time = (local_data_.position_traj_.evaluateDeBoorT(t) - local_target_pt).norm() / pp_.max_vel_ * 2;
         if (poly_time > ts)
         {
@@ -173,6 +193,9 @@ namespace ego_planner
         }
 
         double sample_length = 0;
+        // 沿着这条复用后的路径按近似等间距重新采样，
+        // 变成一串比较均匀的离散点
+        // 目的是得到适合转换成 B-spline 控制点的一组离散点。
         double cps_dist = pp_.ctrl_pt_dist * 1.5; // cps_dist will be divided by 1.5 in the next
         size_t id = 0;
         do
@@ -200,6 +223,8 @@ namespace ego_planner
         start_end_derivatives.push_back(local_data_.acceleration_traj_.evaluateDeBoorT(t_cur));
         start_end_derivatives.push_back(Eigen::Vector3d::Zero());
 
+        // 如果复用出来的初始路径异常地长，说明这条旧轨迹已经不适合继续用了，
+        // 于是放弃它，下一轮改为重新生成多项式初值。
         if (point_set.size() > pp_.planning_horizen_ / pp_.ctrl_pt_dist * 3) // The initial path is unnormally too long!
         {
           flag_force_polynomial = true;
@@ -208,14 +233,17 @@ namespace ego_planner
       }
     } while (flag_regenerate);
 
+    // 把离散路径点和边界导数约束参数化成一条初始的均匀 B-spline。
     Eigen::MatrixXd ctrl_pts;
     UniformBspline::parameterizeToBspline(ts, point_set, start_end_derivatives, ctrl_pts);
 
+    // 初始化用于优化的控制点，并生成 A* 引导路径，帮助后续避障优化。
     vector<vector<Eigen::Vector3d>> a_star_pathes;
     a_star_pathes = bspline_optimizer_rebound_->initControlPoints(ctrl_pts, true);
 
     t_init = ros::Time::now() - t_start;
 
+    // 把初始路径和 A* 引导结果显示出来，便于在 RViz 中调试。
     static int vis_id = 0;
     visualization_->displayInitPathList(point_set, 0.2, 0);
     visualization_->displayAStarList(a_star_pathes, vis_id);
@@ -223,6 +251,7 @@ namespace ego_planner
     t_start = ros::Time::now();
 
     /*** STEP 2: OPTIMIZE ***/
+    // 对 B-spline 控制点做优化，使轨迹同时兼顾平滑性、避障和其他代价项。
     bool flag_step_1_success = bspline_optimizer_rebound_->BsplineOptimizeTrajRebound(ctrl_pts, ts);
     cout << "first_optimize_step_success=" << flag_step_1_success << endl;
     if (!flag_step_1_success)
@@ -237,6 +266,8 @@ namespace ego_planner
     t_start = ros::Time::now();
 
     /*** STEP 3: REFINE(RE-ALLOCATE TIME) IF NECESSARY ***/
+    // 空间形状优化完之后，再检查这条轨迹是否满足速度、加速度等动力学约束。
+    // 如果不满足，就尽量在保持路径形状的前提下重新分配时间。
     UniformBspline pos = UniformBspline(ctrl_pts, 3, ts);
     pos.setPhysicalLimits(pp_.max_vel_, pp_.max_acc_, pp_.feasibility_tolerance_);
 
@@ -261,12 +292,13 @@ namespace ego_planner
 
     t_refine = ros::Time::now() - t_start;
 
-    // save planned results
+    // 保存最终生成的局部轨迹，后续重规划可以基于它继续往下接。
     updateTrajInfo(pos, ros::Time::now());
 
     cout << "total time:\033[42m" << (t_init + t_opt + t_refine).toSec() << "\033[0m,optimize:" << (t_init + t_opt).toSec() << ",refine:" << t_refine.toSec() << endl;
 
-    // success. YoY
+    // 规划成功后，把连续失败计数清零。
+    // 这个计数会影响前面随机初始化的强度。
     continous_failures_count_ = 0;
     return true;
   }
