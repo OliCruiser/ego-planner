@@ -96,6 +96,36 @@ roslaunch ego_planner run_in_sim.launch
 <img src="pictures/sim_demo.gif" width = "640" height = "438" border="5" />
 </p>
 
+## 2.1 接入 Gazebo（使用外部仿真）
+
+如果你已经能跑通仓库内置仿真，但希望改为 Gazebo，只需要把 EGO-Planner 的输入/输出话题和 Gazebo 对齐即可。
+
+新增了一个不依赖内置动力学与地图生成器的 launch 文件：
+```
+source devel/setup.bash
+roslaunch ego_planner run_in_gazebo.launch
+```
+
+默认话题如下，可通过 launch 参数覆盖：
+
+- `odom_topic:=/odom`（无人机里程计，`nav_msgs/Odometry`）
+- `cloud_topic:=/camera/depth/points`（深度点云，`sensor_msgs/PointCloud2`）
+- `camera_pose_topic:=/camera/pose`（若你用深度图融合，可提供相机位姿）
+- `depth_topic:=/camera/depth/image_raw`（若你用深度图融合，可提供深度图）
+
+典型用法（仅用点云建图）：
+```
+roslaunch ego_planner run_in_gazebo.launch \
+  odom_topic:=/your_robot/odom \
+  cloud_topic:=/your_depth_camera/points
+```
+
+规划器输出控制命令话题保持为：
+
+- `planning/pos_cmd`（`quadrotor_msgs/PositionCommand`）
+
+你可以在 Gazebo 控制端（或中间桥接节点）中订阅该话题，再转换到你当前控制器需要的话题类型（例如速度、姿态或轨迹指令）。
+
 ## 3. 使用 IDE
 推荐使用 [vscode](https://code.visualstudio.com/)。项目已包含 _.vscode_ 文件夹（默认隐藏）。
 按以下步骤配置自动补全与跳转，约需 3 分钟。
