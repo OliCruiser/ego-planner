@@ -13,6 +13,7 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   std_msgs
   geometry_msgs
+  trajectory_msgs
   quadrotor_msgs
   plan_env
   path_searching
@@ -67,4 +68,7 @@ add_executable(traj_server src/traj_server.cpp)
 target_link_libraries(traj_server ${catkin_LIBRARIES})
 add_dependencies(traj_server ${${PROJECT_NAME}_EXPORTED_TARGETS})
 
+add_executable(rotors_trajectory_bridge src/rotors_trajectory_bridge.cpp)
+target_link_libraries(rotors_trajectory_bridge ${catkin_LIBRARIES})
+add_dependencies(rotors_trajectory_bridge ${${PROJECT_NAME}_EXPORTED_TARGETS})
 
